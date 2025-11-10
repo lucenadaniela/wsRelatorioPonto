@@ -49,7 +49,7 @@ col1, col2 = st.columns([0.15, 0.85])
 with col1:
     st.image("logo_circulo ws.png", width=120)
 with col2:
-    st.title("📊 Painel monitoramento — Jornada de Colaboradores")
+    st.title("📊 Painel Monitoramento — Jornada de Colaboradores")
     st.caption("Monitoramento diário das batidas de ponto com análise visual e filtros inteligentes.")
 # ==================================================
 
