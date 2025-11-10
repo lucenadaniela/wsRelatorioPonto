@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
@@ -84,8 +83,10 @@ if uploaded_file:
 
     # 🔧 mantém linhas com pelo menos uma marcação
     df = df[df[col_data_inicio].notna() | df[col_data_fim].notna()]
+
+    # >>> AJUSTE AQUI: NÃO preencher FIM automaticamente <<<
+    # Se não houver INÍCIO, usa FIM como início (pra não perder o dia)
     df[col_data_inicio] = df[col_data_inicio].fillna(df[col_data_fim])
-    df[col_data_fim] = df[col_data_fim].fillna(df[col_data_inicio])
 
     # Cria coluna de DATA base
     df["DATA"] = df[col_data_inicio].dt.date
@@ -102,6 +103,10 @@ if uploaded_file:
 
     resumo["INICIO"] = resumo["INICIO"].dt.strftime("%H:%M")
     resumo["FIM"] = resumo["FIM"].dt.strftime("%H:%M")
+
+    # >>> Aqui garantimos que FIM fique vazio se não existir registro <<<
+    resumo["FIM"] = resumo["FIM"].fillna("")
+
     resumo.rename(columns={"Nome_2p": "Colaborador"}, inplace=True)
     resumo = resumo[["Colaborador", "DATA", "INICIO", "FIM", "ENDEREÇO"]]
     resumo = resumo.sort_values(by=["Colaborador", "DATA"]).reset_index(drop=True)
@@ -198,4 +203,3 @@ if uploaded_file:
         st.info("⬆️ Escolha o período e clique em **Pesquisar** para carregar os dados.")
 else:
     st.info("⬆️ Envie um arquivo Excel bruto para iniciar o processamento.")
-
