@@ -1,4 +1,5 @@
 
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -15,10 +16,10 @@ st.markdown("""
             background-color:#EDE3FF;
             border:1px solid #D8C8FF;
             border-radius:10px;
-            padding:8px 10px;
+            padding:10px 12px;
             text-align:center;
             box-shadow:0 1px 3px rgba(0,0,0,0.05);
-            height:100px;
+            height:95px;
             display:flex;
             flex-direction:column;
             justify-content:center;
@@ -27,35 +28,34 @@ st.markdown("""
         .metric-container h2,
         .metric-container span,
         div[data-testid="stMetricValue"] {
-            color:#4C208E !important; /* força o roxo WS em tudo */
+            color:#4C208E !important; /* roxo WS */
         }
         .metric-container h3 {
-            font-size:1.2rem;
+            font-size:1.3rem;
             font-weight:700;
-            margin-bottom:0.3rem;
+            margin-bottom:0.4rem;
         }
         .metric-container h2 {
-            font-size:1.8rem;
+            font-size:1.9rem;
             font-weight:800;
             margin:0;
         }
     </style>
 """, unsafe_allow_html=True)
 
-
-
 # ================== CABEÇALHO ==================
 col1, col2 = st.columns([0.15, 0.85])
 with col1:
     st.image("logo_circulo ws.png", width=120)
 with col2:
-    st.title("📊 Painel Monitoramento — Jornada de Colaboradores")
-    st.caption("Monitoramento diário das batidas de ponto com análise visual e filtros inteligentes.")
+    st.title("📊 Painel de Jornada — WS Transportes")
+    st.caption("Monitoramento diário de ponto com filtros e análises visuais inteligentes.")
 # ==================================================
 
 uploaded_file = st.file_uploader("📁 Envie o arquivo bruto (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
+    # ======== LEITURA ========
     df = pd.read_excel(uploaded_file, skiprows=6)
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -78,11 +78,19 @@ if uploaded_file:
     df = df[df[col_colab].str.split().str.len() >= 2]
     df["Nome_2p"] = df[col_colab].apply(lambda x: " ".join(x.split()[:2]))
 
+    # Converte datas
     df[col_data_inicio] = pd.to_datetime(df[col_data_inicio], errors="coerce")
     df[col_data_fim] = pd.to_datetime(df[col_data_fim], errors="coerce")
-    df = df[df[col_data_inicio].notna() & df[col_data_fim].notna()]
+
+    # 🔧 mantém linhas com pelo menos uma marcação
+    df = df[df[col_data_inicio].notna() | df[col_data_fim].notna()]
+    df[col_data_inicio] = df[col_data_inicio].fillna(df[col_data_fim])
+    df[col_data_fim] = df[col_data_fim].fillna(df[col_data_inicio])
+
+    # Cria coluna de DATA base
     df["DATA"] = df[col_data_inicio].dt.date
 
+    # ======== RESUMO ========
     resumo = (
         df.groupby(["Nome_2p", "DATA"], as_index=False)
         .agg(
@@ -133,13 +141,13 @@ if uploaded_file:
         st.markdown("### 📈 Indicadores Gerais")
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.markdown(f"<div class='metric-container'><h3>👥 Colaboradores</h3><h2 style='color:#5E2B97'>{total_colabs}</h2></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-container'><h3>👥 Colaboradores</h3><h2>{total_colabs}</h2></div>", unsafe_allow_html=True)
         with col2:
-            st.markdown(f"<div class='metric-container'><h3>🕒 Registros</h3><h2 style='color:#F7941D'>{total_registros}</h2></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-container'><h3>🕒 Registros</h3><h2>{total_registros}</h2></div>", unsafe_allow_html=True)
         with col3:
-            st.markdown(f"<div class='metric-container'><h3>📅 Dias no Período</h3><h2 style='color:#5E2B97'>{dias_cobertos}</h2></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-container'><h3>📅 Dias no Período</h3><h2>{dias_cobertos}</h2></div>", unsafe_allow_html=True)
 
-        # ======== TABELA ========
+        # ======== TABELA PRINCIPAL ========
         st.markdown("### 📋 Dados Consolidados")
         st.dataframe(filtrado, use_container_width=True)
 
@@ -153,7 +161,7 @@ if uploaded_file:
         media_jornada["DURAÇÃO (h)"] = media_jornada["DURAÇÃO (h)"].round(2)
         st.dataframe(media_jornada, use_container_width=True)
 
-        # ======== NOVO GRÁFICO: DISTRIBUIÇÃO DE JORNADA DIÁRIA ========
+        # ======== DISTRIBUIÇÃO DE JORNADA ========
         st.markdown("### 📊 Distribuição de Jornada Diária por Colaborador")
         temp = temp.dropna(subset=["DURAÇÃO (h)"])
         if not temp.empty:
@@ -169,8 +177,8 @@ if uploaded_file:
                 xaxis_title="Colaborador",
                 yaxis_title="Duração (horas)",
                 showlegend=False,
-                title_font_color="#5E2B97",
-                font=dict(color="#333")
+                title_font_color="#4C208E",
+                font=dict(color="#4C208E")
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -190,3 +198,4 @@ if uploaded_file:
         st.info("⬆️ Escolha o período e clique em **Pesquisar** para carregar os dados.")
 else:
     st.info("⬆️ Envie um arquivo Excel bruto para iniciar o processamento.")
+
