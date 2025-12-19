@@ -753,14 +753,19 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
 # =========================================================
 
 def build_he_daily(df_he: pd.DataFrame) -> pd.DataFrame:
-    """HE por dia p/ cruzar com o Matinal."""
+    """HE por dia p/ cruzar com o Matinal (Data como date)."""
+
+    tmp = df_he.copy()
+    tmp["Data"] = pd.to_datetime(tmp["Data"], errors="coerce").dt.date  # <<< AQUI
+
     daily = (
-        df_he.groupby(["ColabKey", "Data"], as_index=False)[
+        tmp.groupby(["ColabKey", "Data"], as_index=False)[
             ["HE50_td", "HE70_td", "HE100_td", "Atrasos_td"]
         ].sum()
     )
-    daily["HE50_liq_td"] = daily["HE50_td"] + daily["Atrasos_td"]  # 50% “líquido” com sinal
+    daily["HE50_liq_td"] = daily["HE50_td"] + daily["Atrasos_td"]  # 50% “líquido” (com sinal)
     daily["HE70_100_td"] = daily["HE70_td"] + daily["HE100_td"]
+
     return daily[["ColabKey", "Data", "HE50_liq_td", "HE70_100_td"]]
 
 
