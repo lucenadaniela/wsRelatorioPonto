@@ -4,18 +4,18 @@
 import re
 import unicodedata
 from io import BytesIO
-from datetime import date
+from datetime import date, datetime
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 
 # =========================================================
-# Helpers
+# Helpers de normalização e conversão
 # =========================================================
 
 def normalize_colname(name: str) -> str:
@@ -28,27 +28,43 @@ def normalize_colname(name: str) -> str:
     return s.lower()
 
 
-def norm_person_key(name: str) -> str:
-    if name is None:
-        return ""
-    s = str(name).strip().upper()
-    s = unicodedata.normalize("NFD", s)
-    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
-    s = re.sub(r"[^A-Z ]+", " ", s)
+def name_2p(s: str) -> str:
+    """Primeiras 2 palavras (igual seu código do endereço)."""
+    s = "" if s is None else str(s)
+    s = re.sub(r"[\n\r\t]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s
+    parts = s.split()
+    if len(parts) >= 2:
+        return " ".join(parts[:2]).strip()
+    return s.strip()
+
+
+CANONICAL_MAP = {
+    "colaborador": "Colaborador",
+    "cpf": "CPF",
+    "data": "Data",
+    "previstas": "Previstas",
+    "trabalhadas": "Trabalhadas",
+    "abonadas": "Abonadas",
+    "atrasos": "Atrasos",
+    "noturnas": "Noturnas",
+    "hr. ficta": "Horas Fictas",
+    "hr ficta": "Horas Fictas",
+    "horas fictas": "Horas Fictas",
+    "faltas": "Faltas",
+}
 
 
 def parse_time_to_timedelta(value):
     if pd.isna(value):
         return pd.NaT
 
+    if isinstance(value, pd.Timedelta):
+        return value
+
     s = str(value).strip()
     if s == "" or s in {"-", "—", "–", "--", "nan", "None"}:
         return pd.NaT
-
-    if isinstance(value, pd.Timedelta):
-        return value
 
     if re.match(r"^\d{1,2}:\d{2}$", s):
         try:
@@ -68,6 +84,7 @@ def parse_time_to_timedelta(value):
     if not pd.isna(td):
         return td
 
+    # float Excel (dias)
     try:
         f = float(s.replace(",", "."))
         return pd.to_timedelta(f, unit="D")
@@ -76,71 +93,52 @@ def parse_time_to_timedelta(value):
 
 
 def fmt_td_hms(td: pd.Timedelta) -> str:
-    """Formato: H:MM:SS (igual print)."""
+    """HH:MM:SS (sempre positivo)"""
     if pd.isna(td):
-        return "0:00:00"
-    sec = int(td.total_seconds())
-    if sec < 0:
-        sec = 0
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    s = sec % 60
-    return f"{h}:{m:02d}:{s:02d}"
+        return "00:00:00"
+    total = int(td.total_seconds())
+    if total < 0:
+        total = 0
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def fmt_td_hms_signed(td: pd.Timedelta) -> str:
+    """(+/-)HH:MM:SS"""
     if pd.isna(td):
-        return "0:00:00"
-    sec = int(td.total_seconds())
-    sign = "-" if sec < 0 else ""
-    sec = abs(sec)
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    s = sec % 60
-    return f"{sign}{h}:{m:02d}:{s:02d}"
+        return "00:00:00"
+    total = int(td.total_seconds())
+    sign = "-" if total < 0 else ""
+    total = abs(total)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{sign}{h:02d}:{m:02d}:{s:02d}"
 
 
-def fmt_dt_time(dt) -> str:
-    """INÍCIO/FIM em HH:MM:SS (ou vazio)."""
-    if pd.isna(dt) or dt is None:
+def fmt_dt_time(x) -> str:
+    """HH:MM:SS ou vazio"""
+    if x is None or pd.isna(x):
         return ""
     try:
-        ts = pd.Timestamp(dt)
+        ts = pd.Timestamp(x)
         return ts.strftime("%H:%M:%S")
     except Exception:
         return ""
 
 
 def month_name_pt(m: int) -> str:
-    nomes = [
-        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    meses = [
+        "Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+        "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"
     ]
-    return nomes[m - 1] if 1 <= m <= 12 else ""
+    return meses[m - 1] if 1 <= m <= 12 else ""
 
 
 # =========================================================
-# Mapeamento colunas (Horas Extras)
-# =========================================================
-
-CANONICAL_MAP = {
-    "colaborador": "Colaborador",
-    "cpf": "CPF",
-    "data": "Data",
-    "previstas": "Previstas",
-    "trabalhadas": "Trabalhadas",
-    "abonadas": "Abonadas",
-    "atrasos": "Atrasos",
-    "noturnas": "Noturnas",
-    "hr. ficta": "Horas Fictas",
-    "hr ficta": "Horas Fictas",
-    "horas fictas": "Horas Fictas",
-    "faltas": "Faltas",
-}
-
-
-# =========================================================
-# Etapa 1 — Detectar cabeçalhos e montar tabela longa
+# Etapa 1 — Detectar cabeçalhos e montar tabela longa (HE)
 # =========================================================
 
 def _build_long_from_folha_ponto(raw: pd.DataFrame) -> pd.DataFrame:
@@ -180,7 +178,6 @@ def _build_long_from_folha_ponto(raw: pd.DataFrame) -> pd.DataFrame:
 
     for idx, start in enumerate(block_starts):
         end = block_starts[idx + 1] if idx + 1 < len(block_starts) else n_rows
-
         header_row = find_header_row(start, end)
         if header_row is None:
             continue
@@ -213,7 +210,6 @@ def _build_long_from_folha_ponto(raw: pd.DataFrame) -> pd.DataFrame:
                 r += 1
                 continue
 
-            data_val = v_data
             pontos_val = raw.iloc[r, col_pontos] if col_pontos is not None else None
             trab_val = raw.iloc[r, col_trab] if col_trab is not None else None
             abono_val = raw.iloc[r, col_abono] if col_abono is not None else None
@@ -227,7 +223,7 @@ def _build_long_from_folha_ponto(raw: pd.DataFrame) -> pd.DataFrame:
                 {
                     "Colaborador": str(nome_val).strip() if nome_val is not None else "",
                     "CPF": cpf_str,
-                    "Data": data_val,
+                    "Data": v_data,
                     "Previstas": prev_val,
                     "Trabalhadas": trab_val,
                     "Abonadas": abono_val,
@@ -308,11 +304,10 @@ def classify_weeks(dates: pd.Series) -> pd.Series:
     def _classify(d):
         if pd.isna(d):
             return None
-
         y, m, day = d.year, d.month, d.day
 
         if (y == prev_year) and (m == prev_month):
-            return "Semana 1"
+            return "Semana 1" if day >= 26 else "Semana 1"
 
         if (y == curr_year) and (m == curr_month):
             if 1 <= day <= 7:
@@ -330,7 +325,7 @@ def classify_weeks(dates: pd.Series) -> pd.Series:
 
 
 # =========================================================
-# Etapa 2.1 — Feriados nacionais
+# Etapa 2.1 — Feriados nacionais e domingos (HE 100%)
 # =========================================================
 
 NATIONAL_HOLIDAYS = {
@@ -353,7 +348,7 @@ def is_national_holiday(date_value) -> bool:
 
 
 # =========================================================
-# Etapa 3 — Limpeza + regras HE (ATUALIZADA p/ Nome_2p)
+# Etapa 3 — Limpeza, tipos, Atrasos e HE 50/70/100/Abono
 # =========================================================
 
 def clean_and_enrich(long_df: pd.DataFrame) -> pd.DataFrame:
@@ -390,33 +385,15 @@ def clean_and_enrich(long_df: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
 
-    # Data
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     df = df[~df["Data"].isna()].copy()
 
-    # LIMPEZA NOME (igual teu outro código)
-    df["Colaborador"] = (
-        df["Colaborador"]
-        .astype(str)
-        .replace("nan", "", regex=False)
-        .str.replace(r"[\n\r\t]+", " ", regex=True)
-        .str.replace(r"\s+", " ", regex=True)
-        .str.strip()
-    )
-
-    # Mantém apenas nomes compostos
-    df = df[df["Colaborador"].str.split().str.len() >= 2].copy()
-
-    # Nome_2p igual teu código
-    df["Nome_2p"] = df["Colaborador"].apply(lambda x: " ".join(x.split()[:2]))
-
-    # CPF
+    df["Colaborador"] = df["Colaborador"].astype(str).str.strip()
     df["CPF"] = df["CPF"].astype(str).str.strip()
 
-    # Data como date (pra casar com endereço e pra RESUMO)
-    df["Data"] = df["Data"].dt.date
+    # >>> CHAVE 2P (pra cruzar com endereço)
+    df["Nome_2p"] = df["Colaborador"].apply(name_2p)
 
-    # Timedeltas
     time_cols = [
         "Previstas",
         "Trabalhadas",
@@ -440,11 +417,8 @@ def clean_and_enrich(long_df: pd.DataFrame) -> pd.DataFrame:
     df["Excedente_td"] = df["Trabalhadas_td"] - df["Previstas_td"]
     df["Excedente_td"] = df["Excedente_td"].where(df["Excedente_td"] > zero, zero)
 
-    # Domingo / feriado (usa Timestamp pra dayofweek)
-    data_ts = pd.to_datetime(df["Data"], errors="coerce")
-
-    df["is_domingo"] = data_ts.dt.dayofweek == 6
-    df["is_feriado"] = data_ts.apply(is_national_holiday)
+    df["is_domingo"] = df["Data"].dt.dayofweek == 6
+    df["is_feriado"] = df["Data"].apply(is_national_holiday)
     mask_especial = df["is_domingo"] | df["is_feriado"]
     mask_normal = ~mask_especial
 
@@ -493,39 +467,14 @@ def clean_and_enrich(long_df: pd.DataFrame) -> pd.DataFrame:
         mask_abono_com_trabalho, "Excedente_td"
     ]
 
-    # Semana
-    df["Semana"] = classify_weeks(pd.to_datetime(df["Data"], errors="coerce"))
-    df = df.sort_values(["Nome_2p", "Data"]).reset_index(drop=True)
-
-    # mantém (se você ainda usa em algum lugar)
-    df["ColabKey"] = df["Colaborador"].apply(norm_person_key)
-
+    df["Semana"] = classify_weeks(df["Data"])
+    df = df.sort_values(["Colaborador", "Data"]).reset_index(drop=True)
     return df
 
 
 # =========================================================
-# Semanais e Resumo Geral (mantidos)
+# Etapa 4 — Abas Semanais e Resumo Geral (HE)
 # =========================================================
-
-def _fmt_hhmm(td: pd.Timedelta) -> str:
-    if pd.isna(td):
-        return "00:00"
-    sec = int(td.total_seconds())
-    if sec < 0:
-        sec = 0
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    return f"{h:02d}:{m:02d}"
-
-def _fmt_hhmm_signed(td: pd.Timedelta) -> str:
-    if pd.isna(td):
-        return "00:00"
-    sec = int(td.total_seconds())
-    sign = "-" if sec < 0 else ""
-    sec = abs(sec)
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    return f"{sign}{h:02d}:{m:02d}"
 
 def build_weekly_sheets(df: pd.DataFrame) -> dict:
     weeks = {}
@@ -535,40 +484,38 @@ def build_weekly_sheets(df: pd.DataFrame) -> dict:
         wname = f"Semana {i}"
         sub = df[df["Semana"] == wname].copy()
 
+        cols_out = [
+            "Semana","Colaborador","CPF","Data",
+            "Previstas","Trabalhadas","Atrasos",
+            "HE 50%","HE 70%","HE 100%","Noturnas"
+        ]
+
         if sub.empty:
-            weeks[wname] = pd.DataFrame(
-                columns=[
-                    "Semana", "Colaborador", "CPF", "Data",
-                    "Previstas", "Trabalhadas", "Atrasos",
-                    "HE 50%", "HE 70%", "HE 100%", "Noturnas",
-                ]
-            )
+            weeks[wname] = pd.DataFrame(columns=cols_out)
             continue
 
-        sub = sub.sort_values(["Nome_2p", "CPF", "Data"]).reset_index(drop=True)
+        sub = sub.sort_values(["Colaborador", "CPF", "Data"]).reset_index(drop=True)
         linhas = []
 
-        for (nome2p, cpf), g in sub.groupby(["Nome_2p", "CPF"], sort=False):
+        for (colab, cpf), g in sub.groupby(["Colaborador", "CPF"], sort=False):
             for _, r in g.iterrows():
                 worked_display = r["Trabalhadas_td"]
                 if (r["Abonadas_td"] > zero) and (r["Trabalhadas_td"] == zero):
                     worked_display = r["Abonadas_td"]
 
-                linhas.append(
-                    {
-                        "Semana": r["Semana"],
-                        "Colaborador": nome2p.title(),
-                        "CPF": r["CPF"],
-                        "Data": r["Data"],
-                        "Previstas": _fmt_hhmm(r["Previstas_td"]),
-                        "Trabalhadas": _fmt_hhmm(worked_display),
-                        "Atrasos": _fmt_hhmm_signed(r["Atrasos_td"]),
-                        "HE 50%": _fmt_hhmm(r["HE50_td"]),
-                        "HE 70%": _fmt_hhmm(r["HE70_td"]),
-                        "HE 100%": _fmt_hhmm(r["HE100_td"]),
-                        "Noturnas": _fmt_hhmm(r["Noturnas_td"]),
-                    }
-                )
+                linhas.append({
+                    "Semana": r["Semana"],
+                    "Colaborador": r["Colaborador"],
+                    "CPF": r["CPF"],
+                    "Data": r["Data"].date(),
+                    "Previstas": fmt_td_hms(r["Previstas_td"]),
+                    "Trabalhadas": fmt_td_hms(worked_display),
+                    "Atrasos": fmt_td_hms_signed(r["Atrasos_td"]),
+                    "HE 50%": fmt_td_hms(r["HE50_td"] + r["Atrasos_td"]),  # 50 líquido no dia
+                    "HE 70%": fmt_td_hms(r["HE70_td"]),
+                    "HE 100%": fmt_td_hms(r["HE100_td"]),
+                    "Noturnas": fmt_td_hms(r["Noturnas_td"]),
+                })
 
             soma_prev = g["Previstas_td"].sum()
             soma_atra = g["Atrasos_td"].sum()
@@ -584,30 +531,28 @@ def build_weekly_sheets(df: pd.DataFrame) -> dict:
 
             total50_semana_td = soma_he50 + soma_atra
 
-            linhas.append(
-                {
-                    "Semana": wname,
-                    "Colaborador": f"{nome2p.title()} - TOTAL",
-                    "CPF": cpf,
-                    "Data": "",
-                    "Previstas": _fmt_hhmm(soma_prev),
-                    "Trabalhadas": _fmt_hhmm(soma_trab_display),
-                    "Atrasos": _fmt_hhmm_signed(soma_atra),
-                    "HE 50%": _fmt_hhmm_signed(total50_semana_td),
-                    "HE 70%": _fmt_hhmm(soma_he70),
-                    "HE 100%": _fmt_hhmm(soma_he100),
-                    "Noturnas": _fmt_hhmm(soma_not),
-                }
-            )
+            linhas.append({
+                "Semana": wname,
+                "Colaborador": f"{colab} - TOTAL",
+                "CPF": cpf,
+                "Data": "",
+                "Previstas": fmt_td_hms(soma_prev),
+                "Trabalhadas": fmt_td_hms(soma_trab_display),
+                "Atrasos": fmt_td_hms_signed(soma_atra),
+                "HE 50%": fmt_td_hms_signed(total50_semana_td),
+                "HE 70%": fmt_td_hms(soma_he70),
+                "HE 100%": fmt_td_hms(soma_he100),
+                "Noturnas": fmt_td_hms(soma_not),
+            })
 
-        weeks[wname] = pd.DataFrame(linhas)
+        weeks[wname] = pd.DataFrame(linhas, columns=cols_out)
 
     return weeks
 
 
 def build_resumo_geral(df: pd.DataFrame) -> pd.DataFrame:
-    grp = df.groupby(["Nome_2p", "CPF"], as_index=False)[
-        ["Previstas_td", "Trabalhadas_td", "Abonadas_td", "HE50_td", "HE70_td", "HE100_td", "Atrasos_td", "Noturnas_td"]
+    grp = df.groupby(["Colaborador", "CPF"], as_index=False)[
+        ["Previstas_td","Trabalhadas_td","Abonadas_td","HE50_td","HE70_td","HE100_td","Atrasos_td","Faltas_td","Noturnas_td"]
     ].sum()
 
     grp["Total50_td"] = grp["HE50_td"] + grp["Atrasos_td"]
@@ -616,22 +561,22 @@ def build_resumo_geral(df: pd.DataFrame) -> pd.DataFrame:
     grp["Geral_td"] = grp["Total50_td"] + grp["Total70_td"] + grp["Total100_td"]
 
     out = pd.DataFrame()
-    out["Colaborador"] = grp["Nome_2p"].str.title()
+    out["Colaborador"] = grp["Colaborador"]
     out["CPF"] = grp["CPF"]
-    out["Previstas"] = grp["Previstas_td"].apply(_fmt_hhmm)
-    out["Trabalhadas"] = (grp["Trabalhadas_td"] + grp["Abonadas_td"]).apply(_fmt_hhmm)
-    out["Atrasos"] = grp["Atrasos_td"].apply(_fmt_hhmm_signed)
-    out["50% (liq)"] = grp["Total50_td"].apply(_fmt_hhmm_signed)
-    out["70%"] = grp["Total70_td"].apply(_fmt_hhmm)
-    out["100%"] = grp["Total100_td"].apply(_fmt_hhmm)
-    out["GERAL"] = grp["Geral_td"].apply(_fmt_hhmm)
-    out["Noturnas"] = grp["Noturnas_td"].apply(_fmt_hhmm)
+    out["Previstas"] = grp["Previstas_td"].apply(fmt_td_hms)
+    out["Trabalhadas"] = (grp["Trabalhadas_td"] + grp["Abonadas_td"]).apply(fmt_td_hms)
+    out["Atrasos"] = grp["Atrasos_td"].apply(fmt_td_hms_signed)
+    out["50% (líq)"] = grp["Total50_td"].apply(fmt_td_hms_signed)
+    out["70%"] = grp["Total70_td"].apply(fmt_td_hms)
+    out["100%"] = grp["Total100_td"].apply(fmt_td_hms)
+    out["GERAL"] = grp["Geral_td"].apply(fmt_td_hms)
+    out["Noturnas"] = grp["Noturnas_td"].apply(fmt_td_hms)
 
     return out.sort_values("Colaborador").reset_index(drop=True)
 
 
 # =========================================================
-# Endereço (EXATAMENTE teu código)
+# Relatório de Endereço (PONTO/ENDEREÇO)
 # =========================================================
 
 def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
@@ -643,7 +588,6 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
     col_data_fim = [c for c in df.columns if c.startswith("Data.") or "Saída" in c][0]
     col_endereco = "Endereço"
 
-    # ===== LIMPEZA NOME (igual seu código) =====
     df[col_colab] = (
         df[col_colab]
         .astype(str)
@@ -653,24 +597,20 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
         .str.strip()
     )
 
-    # Mantém apenas nomes compostos
     df = df[df[col_colab].str.split().str.len() >= 2].copy()
-    df["Nome_2p"] = df[col_colab].apply(lambda x: " ".join(x.split()[:2]))
+    df["Nome_2p"] = df[col_colab].apply(name_2p)
 
-    # Datas
     df[col_data_inicio] = pd.to_datetime(df[col_data_inicio], errors="coerce")
     df[col_data_fim] = pd.to_datetime(df[col_data_fim], errors="coerce")
 
     # ✅ mantém linhas com pelo menos UMA marcação
     df = df[df[col_data_inicio].notna() | df[col_data_fim].notna()].copy()
 
-    # ✅ se não tiver INÍCIO, usa o FIM como início (pra não perder o dia)
+    # ✅ se não tiver INÍCIO, usa FIM como início
     df[col_data_inicio] = df[col_data_inicio].fillna(df[col_data_fim])
 
-    # data base
     df["DATA"] = df[col_data_inicio].dt.date
 
-    # resumo por colaborador/dia
     resumo = (
         df.groupby(["Nome_2p", "DATA"], as_index=False)
         .agg(
@@ -680,7 +620,6 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
         )
     )
 
-    # ✅ FIM pode ser NaT (dia atual), e tudo bem
     resumo.rename(columns={"Nome_2p": "Colaborador"}, inplace=True)
     resumo = resumo[["Colaborador", "DATA", "INICIO", "FIM", "ENDEREÇO"]]
     resumo = resumo.sort_values(by=["Colaborador", "DATA"]).reset_index(drop=True)
@@ -688,72 +627,88 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
 
 
 # =========================================================
-# RESUMO (aba técnica) para fórmulas do Matinal
+# Matinal (VALORES PRONTOS, sem fórmula)
 # =========================================================
 
-def build_resumo_ws(df_he_final: pd.DataFrame, dia_1: date, colaboradores_ordem: list[str]) -> pd.DataFrame:
-    """
-    Monta tabela com colunas A..S (19) para:
-    - G: 50% do dia_1 (HE50 + atrasos)
-    - H: 70+100 do dia_1
-    - M: acumulado 70+100 até dia_1
-    - S: acumulado 50% antes do dia_1
-    """
-    zero = pd.Timedelta(0)
+def build_matinal_table(df_he_final: pd.DataFrame, df_end: pd.DataFrame):
+    datas = sorted(df_end["DATA"].dropna().unique().tolist())
+    if len(datas) < 2:
+        raise ValueError("O relatório de endereço precisa ter pelo menos 2 dias para montar o Matinal.")
 
-    tmp = df_he_final.copy()
-    tmp["Data"] = pd.to_datetime(tmp["Data"], errors="coerce").dt.date
+    dia_1, dia_2 = datas[-2], datas[-1]
+
+    end_sub = df_end[df_end["DATA"].isin([dia_1, dia_2])].copy()
+    colaboradores = sorted(end_sub["Colaborador"].unique().tolist())
+    idx_end = {(r.Colaborador, r.DATA): r for r in end_sub.itertuples(index=False)}
+
+    he = df_he_final.copy()
+    he["Data"] = pd.to_datetime(he["Data"], errors="coerce").dt.date
 
     daily = (
-        tmp.groupby(["Nome_2p", "Data"], as_index=False)[["HE50_td", "HE70_td", "HE100_td", "Atrasos_td"]]
-        .sum()
+        he.groupby(["Nome_2p", "Data"], as_index=False)[["HE50_td", "HE70_td", "HE100_td", "Atrasos_td"]]
+          .sum()
     )
     daily["HE50_liq_td"] = daily["HE50_td"] + daily["Atrasos_td"]
     daily["HE70100_td"] = daily["HE70_td"] + daily["HE100_td"]
 
-    d1 = daily[daily["Data"] == dia_1][["Nome_2p", "HE50_liq_td", "HE70100_td"]].copy()
-    d1 = d1.rename(columns={"HE50_liq_td": "DIA1_50", "HE70100_td": "DIA1_70100"})
-
-    acum50_antes = (
+    acum50_before = (
         daily[daily["Data"] < dia_1]
         .groupby("Nome_2p", as_index=False)[["HE50_liq_td"]].sum()
-        .rename(columns={"HE50_liq_td": "ACUM50_ANTES"})
+        .rename(columns={"HE50_liq_td": "ACUM50_BEFORE"})
     )
-
-    acum70100_ate = (
+    acum70100_to = (
         daily[daily["Data"] <= dia_1]
         .groupby("Nome_2p", as_index=False)[["HE70100_td"]].sum()
-        .rename(columns={"HE70100_td": "ACUM70100_ATE"})
+        .rename(columns={"HE70100_td": "ACUM70100"})
+    )
+    day1_vals = (
+        daily[daily["Data"] == dia_1][["Nome_2p", "HE50_liq_td", "HE70100_td"]]
+        .rename(columns={"HE50_liq_td": "D1_50", "HE70100_td": "D1_70100"})
     )
 
-    base = pd.DataFrame({"Nome_2p": colaboradores_ordem})
-    out = (
-        base.merge(d1, on="Nome_2p", how="left")
-            .merge(acum70100_ate, on="Nome_2p", how="left")
-            .merge(acum50_antes, on="Nome_2p", how="left")
+    base = pd.DataFrame({"Nome_2p": colaboradores})
+    tmp = (
+        base.merge(day1_vals, on="Nome_2p", how="left")
+            .merge(acum50_before, on="Nome_2p", how="left")
+            .merge(acum70100_to, on="Nome_2p", how="left")
     )
 
-    for c in ["DIA1_50", "DIA1_70100", "ACUM70100_ATE", "ACUM50_ANTES"]:
-        out[c] = out[c].fillna(zero)
+    zero = pd.Timedelta(0)
+    for c in ["D1_50", "D1_70100", "ACUM50_BEFORE", "ACUM70100"]:
+        tmp[c] = tmp[c].fillna(zero)
 
-    # cria colunas A..S (19)
-    cols = [f"COL{i}" for i in range(1, 20)]
-    resumo = pd.DataFrame({c: [""] * len(out) for c in cols})
+    # saída pronta
+    rows = []
+    for nome2p in colaboradores:
+        rec1 = idx_end.get((nome2p, dia_1))
+        rec2 = idx_end.get((nome2p, dia_2))
 
-    resumo["COL1"] = out["Nome_2p"].str.title()                # A
-    resumo["COL7"] = out["DIA1_50"].apply(fmt_td_hms_signed)    # G
-    resumo["COL8"] = out["DIA1_70100"].apply(fmt_td_hms)        # H
-    resumo["COL13"] = out["ACUM70100_ATE"].apply(fmt_td_hms)    # M
-    resumo["COL19"] = out["ACUM50_ANTES"].apply(fmt_td_hms_signed)  # S
+        t = tmp[tmp["Nome_2p"] == nome2p].iloc[0]
+        acumulado_50 = t["ACUM50_BEFORE"] + t["D1_50"]
 
-    return resumo
+        rows.append({
+            "COLABORADOR": nome2p.title(),
+            "D1_INICIO": fmt_dt_time(rec1.INICIO) if rec1 else "",
+            "D1_FIM": fmt_dt_time(rec1.FIM) if (rec1 and pd.notna(rec1.FIM)) else "",
+            "D1_BASE": rec1.ENDEREÇO if rec1 else "",
+            "D1_50": fmt_td_hms_signed(t["D1_50"]),
+            "D1_70100": fmt_td_hms(t["D1_70100"]),
+            "D2_INICIO": fmt_dt_time(rec2.INICIO) if rec2 else "",
+            "D2_BASE": rec2.ENDEREÇO if rec2 else "",
+            "ACUM_50": fmt_td_hms_signed(acumulado_50),
+            "ACUM_70100": fmt_td_hms(t["ACUM70100"]),
+        })
+
+    return pd.DataFrame(rows), dia_1, dia_2
 
 
 # =========================================================
-# Matinal (sheet formatada) + fórmulas
+# Matinal — Formatação igual ao print
 # =========================================================
 
 def create_matinal_sheet(wb, dia_1: date, dia_2: date):
+    ws = wb.create_sheet("Matinal")
+
     purple = PatternFill("solid", fgColor="4C208E")
     white_bold = Font(color="FFFFFF", bold=True)
     title_font = Font(bold=True, size=18)
@@ -762,9 +717,7 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws = wb.create_sheet("Matinal")
-
-    # >>>> Ajuste pra bater com o print:
+    # Linhas (como seu print)
     TITLE_ROW = 4
     GROUP_ROW = 6
     SUB_ROW = 7
@@ -773,7 +726,7 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     total_cols = 10
     last_col_letter = get_column_letter(total_cols)
 
-    mes = month_name_pt(dia_2.month)
+    mes = month_name_pt(pd.Timestamp(dia_2).month)
     ws.merge_cells(f"A{TITLE_ROW}:{last_col_letter}{TITLE_ROW}")
     ws[f"A{TITLE_ROW}"] = f"Relatório Matinal - {mes}"
     ws[f"A{TITLE_ROW}"].font = title_font
@@ -783,7 +736,6 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     ws.cell(GROUP_ROW, 1, "Nome")
     ws.cell(SUB_ROW, 1, "COLABORADOR")
 
-    # Dia 1
     d1_txt = pd.Timestamp(dia_1).strftime("%d/%m/%Y")
     ws.merge_cells(start_row=GROUP_ROW, start_column=2, end_row=GROUP_ROW, end_column=6)
     ws.cell(GROUP_ROW, 2, d1_txt)
@@ -791,14 +743,12 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     for j, s in enumerate(subs_d1):
         ws.cell(SUB_ROW, 2 + j, s)
 
-    # Dia 2
     d2_txt = pd.Timestamp(dia_2).strftime("%d/%m/%Y")
     ws.merge_cells(start_row=GROUP_ROW, start_column=7, end_row=GROUP_ROW, end_column=8)
     ws.cell(GROUP_ROW, 7, d2_txt)
     ws.cell(SUB_ROW, 7, "INÍCIO")
     ws.cell(SUB_ROW, 8, "BASE")
 
-    # Acumulado
     ws.merge_cells(start_row=GROUP_ROW, start_column=9, end_row=GROUP_ROW, end_column=10)
     ws.cell(GROUP_ROW, 9, "ACUMULADO")
     ws.cell(SUB_ROW, 9, "50%")
@@ -817,11 +767,11 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     ws.column_dimensions["A"].width = 26
     ws.column_dimensions["B"].width = 11
     ws.column_dimensions["C"].width = 11
-    ws.column_dimensions["D"].width = 34
+    ws.column_dimensions["D"].width = 36
     ws.column_dimensions["E"].width = 12
     ws.column_dimensions["F"].width = 12
     ws.column_dimensions["G"].width = 11
-    ws.column_dimensions["H"].width = 34
+    ws.column_dimensions["H"].width = 36
     ws.column_dimensions["I"].width = 12
     ws.column_dimensions["J"].width = 12
 
@@ -830,41 +780,33 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     return ws, border, center, left, DATA_START_ROW
 
 
-def write_matinal_rows(ws, border, center, left, df_end: pd.DataFrame, dia_1: date, dia_2: date, start_row: int):
-    sub = df_end[df_end["DATA"].isin([dia_1, dia_2])].copy()
-    colaboradores = sorted(sub["Colaborador"].unique().tolist())
-
-    idx = {(r.Colaborador, r.DATA): r for r in sub.itertuples(index=False)}
-
+def write_matinal_values(ws, border, center, left, matinal_df: pd.DataFrame, start_row: int):
     r = start_row
-    for colab in colaboradores:
-        ws.cell(r, 1).value = colab.title()
+    for _, row in matinal_df.iterrows():
+        ws.cell(r, 1).value = row["COLABORADOR"]
         ws.cell(r, 1).alignment = left
         ws.cell(r, 1).border = border
 
-        rec1 = idx.get((colab, dia_1))
-        ws.cell(r, 2).value = fmt_dt_time(rec1.INICIO) if rec1 else ""
-        ws.cell(r, 3).value = fmt_dt_time(rec1.FIM) if rec1 else ""     # pode ficar vazio
-        ws.cell(r, 4).value = rec1.ENDEREÇO if rec1 else ""
+        values = [
+            row["D1_INICIO"],
+            row["D1_FIM"],
+            row["D1_BASE"],
+            row["D1_50"],
+            row["D1_70100"],
+            row["D2_INICIO"],
+            row["D2_BASE"],
+            row["ACUM_50"],
+            row["ACUM_70100"],
+        ]
 
-        # >>> fórmulas (mesma linha do RESUMO)
-        ws.cell(r, 5).value = f"=RESUMO!G{r}"              # 50%
-        ws.cell(r, 6).value = f"=RESUMO!H{r}"              # 70+100
-
-        rec2 = idx.get((colab, dia_2))
-        ws.cell(r, 7).value = fmt_dt_time(rec2.INICIO) if rec2 else ""  # dia atual: normalmente só início
-        ws.cell(r, 8).value = rec2.ENDEREÇO if rec2 else ""
-
-        ws.cell(r, 9).value = f"=RESUMO!S{r}+RESUMO!G{r}"  # ACUM 50
-        ws.cell(r, 10).value = f"=RESUMO!M{r}"             # ACUM 70+100
-
-        for c in range(2, 11):
-            ws.cell(r, c).alignment = center
-            ws.cell(r, c).border = border
+        for c, v in enumerate(values, start=2):
+            cell = ws.cell(r, c)
+            cell.value = v
+            cell.alignment = center if c != 4 and c != 8 else center  # base também central no print
+            cell.border = border
 
         r += 1
 
-    return colaboradores
 
 # =========================================================
 # Excel final
@@ -874,17 +816,7 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
     weeks = build_weekly_sheets(df_he_final)
     resumo_geral = build_resumo_geral(df_he_final)
 
-    datas = sorted(df_end["DATA"].unique().tolist())
-    if len(datas) < 2:
-        raise ValueError("O relatório de endereço precisa ter pelo menos 2 dias para montar o Matinal.")
-    dia_1, dia_2 = datas[-2], datas[-1]
-
-    # Ordem do Matinal manda a ordem do RESUMO (pra fórmula bater)
-    sub = df_end[df_end["DATA"].isin([dia_1, dia_2])]
-    colaboradores_ordem = sorted(sub["Colaborador"].unique().tolist())
-
-    # monta RESUMO técnico (com COL1..COL19)
-    resumo_ws = build_resumo_ws(df_he_final, dia_1, colaboradores_ordem)
+    matinal_df, dia_1, dia_2 = build_matinal_table(df_he_final, df_end)
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -897,25 +829,9 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
 
         wb = writer.book
 
-        # Matinal (formatado) -> já diz em qual linha começam os dados (linha 8)
+        # Matinal formatado (igual ao print)
         ws_mat, border, center, left, DATA_START_ROW = create_matinal_sheet(wb, dia_1, dia_2)
-
-        # ✅ RESUMO: escreve UMA ÚNICA VEZ, sem cabeçalho, começando na mesma linha do Matinal
-        # Ex.: DATA_START_ROW = 8 -> RESUMO começa na linha 8
-        resumo_ws.to_excel(
-            writer,
-            sheet_name="RESUMO",
-            index=False,
-            header=False,
-            startrow=DATA_START_ROW - 1  # startrow é 0-based => linha 8 = 7
-        )
-
-        # Matinal com dados e fórmulas (E/F/I/J apontando pra RESUMO na MESMA linha)
-        write_matinal_rows(
-            ws_mat, border, center, left,
-            df_end, dia_1, dia_2,
-            start_row=DATA_START_ROW
-        )
+        write_matinal_values(ws_mat, border, center, left, matinal_df, start_row=DATA_START_ROW)
 
         # remove "Sheet" se existir
         if "Sheet" in wb.sheetnames:
@@ -925,50 +841,50 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
     return output.getvalue()
 
 
-
 # =========================================================
-# Streamlit UI
+# Interface Streamlit
 # =========================================================
 
 def main():
-    st.set_page_config(page_title="WS | Jornada (HE + Matinal)", layout="wide")
-    st.title("📊 Processador de Jornada — HE + Matinal (igual ao print)")
+    st.set_page_config(page_title="WS | Processador de Jornada + Matinal", layout="wide")
+    st.title("📊 Processador de Jornada (HE) + Relatório Matinal — WS Transportes")
 
     st.markdown(
         """
-**Como funciona:**
-- **Arquivo 1:** Horas Extras / Folha de Ponto → calcula HE 50/70/100 (regras).
-- **Arquivo 2:** Relatório de Pontos com Endereço → monta Matinal (INÍCIO/FIM/BASE) com **Nome_2p**.
-- O Matinal puxa horas por **fórmulas** da aba **RESUMO** (G/H/M/S).
+**Como funciona agora (do jeito que você pediu):**
+- Você envia **2 arquivos**:
+  1) **Horas Extras / Folha de Ponto (HE)** → calcula 50/70/100 com suas regras.
+  2) **Folha Ponto Endereço** → pega INÍCIO/FIM/BASE para os 2 últimos dias (dia atual pode vir sem FIM).
+- A aba **Matinal** sai **sem fórmulas**, já com os valores preenchidos, no layout do print.
         """
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        horas_file = st.file_uploader("1) Envie Horas Extras / Folha de Ponto (.xlsx)", type=["xlsx"], key="he")
-    with col2:
-        endereco_file = st.file_uploader("2) Envie Relatório de Pontos com Endereço (.xlsx)", type=["xlsx"], key="end")
+    colA, colB = st.columns(2)
+    with colA:
+        he_file = st.file_uploader("📁 1) Envie o relatório de Horas Extras / Folha de Ponto (.xlsx)", type=["xlsx"], key="he")
+    with colB:
+        end_file = st.file_uploader("📁 2) Envie o relatório Folha Ponto Endereço (.xlsx)", type=["xlsx"], key="end")
 
-    if not horas_file or not endereco_file:
-        st.info("⬆️ Envie os dois arquivos para gerar o Excel completo.")
+    if not he_file or not end_file:
+        st.info("⬆️ Envie **os dois arquivos** para gerar o Excel completo.")
         return
 
     try:
-        # Horas Extras
-        raw = pd.read_excel(horas_file, sheet_name=0, header=None, dtype=str)
+        # ===== HE =====
+        raw = pd.read_excel(he_file, sheet_name=0, header=None, dtype=str)
         long_df = detect_blocks_and_build_long(raw)
         df_he_final = clean_and_enrich(long_df)
 
-        # Endereço (matinal base)
-        df_end = read_pontos_endereco(endereco_file)
+        # ===== ENDEREÇO =====
+        df_end = read_pontos_endereco(end_file)
 
-        st.success("✅ Processado com sucesso!")
+        # previews
+        st.success("✅ Arquivos processados!")
+        st.subheader("Prévia HE (tratado)")
+        st.dataframe(df_he_final[["Colaborador","Nome_2p","CPF","Data","Semana"]].head(30), use_container_width=True)
 
-        st.subheader("Prévia — Endereço (base do Matinal)")
-        st.dataframe(df_end.head(40), use_container_width=True)
-
-        st.subheader("Prévia — HE (tratado)")
-        st.dataframe(df_he_final[["Nome_2p", "Data", "Semana"]].head(40), use_container_width=True)
+        st.subheader("Prévia Endereço (tratado)")
+        st.dataframe(df_end.head(30), use_container_width=True)
 
         excel_bytes = generate_excel_bytes(df_he_final, df_end)
 
