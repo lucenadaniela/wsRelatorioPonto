@@ -1,5 +1,3 @@
-# app_horas_extras.py
-# -*- coding: utf-8 -*-
 
 import re
 import unicodedata
