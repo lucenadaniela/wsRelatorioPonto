@@ -643,6 +643,7 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
     col_data_fim = [c for c in df.columns if c.startswith("Data.") or "Saída" in c][0]
     col_endereco = "Endereço"
 
+    # ===== LIMPEZA NOME (igual seu código) =====
     df[col_colab] = (
         df[col_colab]
         .astype(str)
@@ -656,13 +657,20 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
     df = df[df[col_colab].str.split().str.len() >= 2].copy()
     df["Nome_2p"] = df[col_colab].apply(lambda x: " ".join(x.split()[:2]))
 
+    # Datas
     df[col_data_inicio] = pd.to_datetime(df[col_data_inicio], errors="coerce")
     df[col_data_fim] = pd.to_datetime(df[col_data_fim], errors="coerce")
 
-    # somente com início e fim (igual teu código)
-    df = df[df[col_data_inicio].notna() & df[col_data_fim].notna()].copy()
+    # ✅ mantém linhas com pelo menos UMA marcação
+    df = df[df[col_data_inicio].notna() | df[col_data_fim].notna()].copy()
+
+    # ✅ se não tiver INÍCIO, usa o FIM como início (pra não perder o dia)
+    df[col_data_inicio] = df[col_data_inicio].fillna(df[col_data_fim])
+
+    # data base
     df["DATA"] = df[col_data_inicio].dt.date
 
+    # resumo por colaborador/dia
     resumo = (
         df.groupby(["Nome_2p", "DATA"], as_index=False)
         .agg(
@@ -672,6 +680,7 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
         )
     )
 
+    # ✅ FIM pode ser NaT (dia atual), e tudo bem
     resumo.rename(columns={"Nome_2p": "Colaborador"}, inplace=True)
     resumo = resumo[["Colaborador", "DATA", "INICIO", "FIM", "ENDEREÇO"]]
     resumo = resumo.sort_values(by=["Colaborador", "DATA"]).reset_index(drop=True)
@@ -755,51 +764,48 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
 
     ws = wb.create_sheet("Matinal")
 
-    # Layout fixo: 10 colunas
-    # A Nome
-    # Dia1: B INÍCIO, C FIM, D BASE, E 50%, F 70+100
-    # Dia2: G INÍCIO, H BASE
-    # ACUM: I 50%, J 70+100
+    # >>>> Ajuste pra bater com o print:
+    TITLE_ROW = 4
+    GROUP_ROW = 6
+    SUB_ROW = 7
+    DATA_START_ROW = 8
+
     total_cols = 10
     last_col_letter = get_column_letter(total_cols)
 
     mes = month_name_pt(dia_2.month)
-    ws.merge_cells(f"A1:{last_col_letter}1")
-    ws["A1"] = f"Relatório Matinal - {mes}"
-    ws["A1"].font = title_font
-    ws["A1"].alignment = center
+    ws.merge_cells(f"A{TITLE_ROW}:{last_col_letter}{TITLE_ROW}")
+    ws[f"A{TITLE_ROW}"] = f"Relatório Matinal - {mes}"
+    ws[f"A{TITLE_ROW}"].font = title_font
+    ws[f"A{TITLE_ROW}"].alignment = center
 
     # Cabeçalhos grupo
-    r_group = 2
-    r_sub = 3
-
-    # Nome
-    ws.cell(r_group, 1, "Nome")
-    ws.cell(r_sub, 1, "COLABORADOR")
+    ws.cell(GROUP_ROW, 1, "Nome")
+    ws.cell(SUB_ROW, 1, "COLABORADOR")
 
     # Dia 1
     d1_txt = pd.Timestamp(dia_1).strftime("%d/%m/%Y")
-    ws.merge_cells(start_row=r_group, start_column=2, end_row=r_group, end_column=6)
-    ws.cell(r_group, 2, d1_txt)
+    ws.merge_cells(start_row=GROUP_ROW, start_column=2, end_row=GROUP_ROW, end_column=6)
+    ws.cell(GROUP_ROW, 2, d1_txt)
     subs_d1 = ["INÍCIO", "FIM", "BASE", "50%", "70% e 100%"]
     for j, s in enumerate(subs_d1):
-        ws.cell(r_sub, 2 + j, s)
+        ws.cell(SUB_ROW, 2 + j, s)
 
     # Dia 2
     d2_txt = pd.Timestamp(dia_2).strftime("%d/%m/%Y")
-    ws.merge_cells(start_row=r_group, start_column=7, end_row=r_group, end_column=8)
-    ws.cell(r_group, 7, d2_txt)
-    ws.cell(r_sub, 7, "INÍCIO")
-    ws.cell(r_sub, 8, "BASE")
+    ws.merge_cells(start_row=GROUP_ROW, start_column=7, end_row=GROUP_ROW, end_column=8)
+    ws.cell(GROUP_ROW, 7, d2_txt)
+    ws.cell(SUB_ROW, 7, "INÍCIO")
+    ws.cell(SUB_ROW, 8, "BASE")
 
     # Acumulado
-    ws.merge_cells(start_row=r_group, start_column=9, end_row=r_group, end_column=10)
-    ws.cell(r_group, 9, "ACUMULADO")
-    ws.cell(r_sub, 9, "50%")
-    ws.cell(r_sub, 10, "70% e 100%")
+    ws.merge_cells(start_row=GROUP_ROW, start_column=9, end_row=GROUP_ROW, end_column=10)
+    ws.cell(GROUP_ROW, 9, "ACUMULADO")
+    ws.cell(SUB_ROW, 9, "50%")
+    ws.cell(SUB_ROW, 10, "70% e 100%")
 
-    # Estilos dos cabeçalhos (2 e 3)
-    for rr in [r_group, r_sub]:
+    # Estilo cabeçalhos
+    for rr in [GROUP_ROW, SUB_ROW]:
         for cc in range(1, total_cols + 1):
             cell = ws.cell(rr, cc)
             cell.fill = purple
@@ -807,7 +813,7 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
             cell.alignment = center
             cell.border = border
 
-    # colunas
+    # larguras
     ws.column_dimensions["A"].width = 26
     ws.column_dimensions["B"].width = 11
     ws.column_dimensions["C"].width = 11
@@ -819,20 +825,12 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     ws.column_dimensions["I"].width = 12
     ws.column_dimensions["J"].width = 12
 
-    ws.row_dimensions[2].height = 22
-    ws.row_dimensions[3].height = 20
+    ws.freeze_panes = f"B{DATA_START_ROW}"
 
-    ws.freeze_panes = "B4"
-
-    return ws, border, center, left
+    return ws, border, center, left, DATA_START_ROW
 
 
-def write_matinal_rows(ws, border, center, left, df_end: pd.DataFrame, dia_1: date, dia_2: date, start_row: int = 6):
-    """
-    Preenche Matinal com:
-    - dados do df_end (INÍCIO/FIM/BASE)
-    - fórmulas para horas puxando da aba RESUMO
-    """
+def write_matinal_rows(ws, border, center, left, df_end: pd.DataFrame, dia_1: date, dia_2: date, start_row: int):
     sub = df_end[df_end["DATA"].isin([dia_1, dia_2])].copy()
     colaboradores = sorted(sub["Colaborador"].unique().tolist())
 
@@ -840,42 +838,33 @@ def write_matinal_rows(ws, border, center, left, df_end: pd.DataFrame, dia_1: da
 
     r = start_row
     for colab in colaboradores:
-        # A - nome
         ws.cell(r, 1).value = colab.title()
         ws.cell(r, 1).alignment = left
         ws.cell(r, 1).border = border
 
-        # Dia 1
         rec1 = idx.get((colab, dia_1))
         ws.cell(r, 2).value = fmt_dt_time(rec1.INICIO) if rec1 else ""
-        ws.cell(r, 3).value = fmt_dt_time(rec1.FIM) if rec1 else ""
+        ws.cell(r, 3).value = fmt_dt_time(rec1.FIM) if rec1 else ""     # pode ficar vazio
         ws.cell(r, 4).value = rec1.ENDEREÇO if rec1 else ""
 
-        # horas por fórmula (dia 1)
-        ws.cell(r, 5).value = f"=RESUMO!G{r}"             # 50%
-        ws.cell(r, 6).value = f"=RESUMO!H{r}"             # 70+100
+        # >>> fórmulas (mesma linha do RESUMO)
+        ws.cell(r, 5).value = f"=RESUMO!G{r}"              # 50%
+        ws.cell(r, 6).value = f"=RESUMO!H{r}"              # 70+100
 
-        # Dia 2
         rec2 = idx.get((colab, dia_2))
-        ws.cell(r, 7).value = fmt_dt_time(rec2.INICIO) if rec2 else ""
+        ws.cell(r, 7).value = fmt_dt_time(rec2.INICIO) if rec2 else ""  # dia atual: normalmente só início
         ws.cell(r, 8).value = rec2.ENDEREÇO if rec2 else ""
 
-        # acumulado por fórmula
-        ws.cell(r, 9).value = f"=RESUMO!S{r}+RESUMO!G{r}" # ACUM 50
-        ws.cell(r, 10).value = f"=RESUMO!M{r}"            # ACUM 70+100
+        ws.cell(r, 9).value = f"=RESUMO!S{r}+RESUMO!G{r}"  # ACUM 50
+        ws.cell(r, 10).value = f"=RESUMO!M{r}"             # ACUM 70+100
 
-        # estilo borda/centro nas demais
         for c in range(2, 11):
             ws.cell(r, c).alignment = center
             ws.cell(r, c).border = border
-        # base alinhada ao centro fica ok; se quiser left nas bases:
-        ws.cell(r, 4).alignment = center
-        ws.cell(r, 8).alignment = center
 
         r += 1
 
     return colaboradores
-
 
 # =========================================================
 # Excel final
@@ -894,6 +883,7 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
     sub = df_end[df_end["DATA"].isin([dia_1, dia_2])]
     colaboradores_ordem = sorted(sub["Colaborador"].unique().tolist())
 
+    # monta RESUMO técnico (com COL1..COL19)
     resumo_ws = build_resumo_ws(df_he_final, dia_1, colaboradores_ordem)
 
     output = BytesIO()
@@ -905,14 +895,27 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
         # Resumo Geral
         resumo_geral.to_excel(writer, sheet_name="Resumo Geral", index=False)
 
-        # RESUMO (aba técnica) começa na linha 6 (startrow=5) p/ bater G6 etc
-        resumo_ws.to_excel(writer, sheet_name="RESUMO", index=False, startrow=5)
-
         wb = writer.book
 
-        # Matinal (formatado)
-        ws_mat, border, center, left = create_matinal_sheet(wb, dia_1, dia_2)
-        write_matinal_rows(ws_mat, border, center, left, df_end, dia_1, dia_2, start_row=6)
+        # Matinal (formatado) -> já diz em qual linha começam os dados (linha 8)
+        ws_mat, border, center, left, DATA_START_ROW = create_matinal_sheet(wb, dia_1, dia_2)
+
+        # ✅ RESUMO: escreve UMA ÚNICA VEZ, sem cabeçalho, começando na mesma linha do Matinal
+        # Ex.: DATA_START_ROW = 8 -> RESUMO começa na linha 8
+        resumo_ws.to_excel(
+            writer,
+            sheet_name="RESUMO",
+            index=False,
+            header=False,
+            startrow=DATA_START_ROW - 1  # startrow é 0-based => linha 8 = 7
+        )
+
+        # Matinal com dados e fórmulas (E/F/I/J apontando pra RESUMO na MESMA linha)
+        write_matinal_rows(
+            ws_mat, border, center, left,
+            df_end, dia_1, dia_2,
+            start_row=DATA_START_ROW
+        )
 
         # remove "Sheet" se existir
         if "Sheet" in wb.sheetnames:
@@ -920,6 +923,7 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
 
     output.seek(0)
     return output.getvalue()
+
 
 
 # =========================================================
