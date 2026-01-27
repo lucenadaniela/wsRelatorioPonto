@@ -1,3 +1,5 @@
+# app_jornada_matinal_ws.py
+# -*- coding: utf-8 -*-
 
 import re
 import unicodedata
@@ -305,7 +307,7 @@ def classify_weeks(dates: pd.Series) -> pd.Series:
         y, m, day = d.year, d.month, d.day
 
         if (y == prev_year) and (m == prev_month):
-            return "Semana 1" if day >= 26 else "Semana 1"
+            return "Semana 1"
 
         if (y == curr_year) and (m == curr_month):
             if 1 <= day <= 7:
@@ -574,18 +576,81 @@ def build_resumo_geral(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# Relatório de Endereço (PONTO/ENDEREÇO)
+# Relatório de Endereço (PONTO/ENDEREÇO)  ✅ CORRIGIDO
 # =========================================================
 
 def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
     df = pd.read_excel(uploaded_file, skiprows=6)
     df.columns = [str(c).strip() for c in df.columns]
 
-    col_colab = "Colaborador"
-    col_data_inicio = "Data"
-    col_data_fim = [c for c in df.columns if c.startswith("Data.") or "Saída" in c][0]
-    col_endereco = "Endereço"
+    # -----------------------------
+    # Helpers de detecção de coluna
+    # -----------------------------
+    def _norm(s: str) -> str:
+        s = "" if s is None else str(s)
+        s = unicodedata.normalize("NFD", s)
+        s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+        return s.strip().lower()
 
+    def pick_first_by_contains(cols, keywords):
+        cols_norm = [(_norm(c), c) for c in cols]
+        for kn in keywords:
+            knn = _norm(kn)
+            for cnorm, corig in cols_norm:
+                if knn in cnorm:
+                    return corig
+        return None
+
+    def pick_first_by_startswith(cols, prefixes):
+        cols_norm = [(_norm(c), c) for c in cols]
+        for pr in prefixes:
+            prn = _norm(pr)
+            for cnorm, corig in cols_norm:
+                if cnorm.startswith(prn):
+                    return corig
+        return None
+
+    cols = list(df.columns)
+
+    # Colaborador
+    col_colab = pick_first_by_contains(cols, ["colaborador", "nome"]) or "Colaborador"
+    if col_colab not in df.columns:
+        raise ValueError(
+            "Não encontrei a coluna de colaborador no arquivo de Endereço. "
+            f"Colunas disponíveis: {', '.join(map(str, df.columns))}"
+        )
+
+    # Endereço/Base
+    col_endereco = pick_first_by_contains(cols, ["endereco", "endereço", "base", "local"]) or "Endereço"
+    if col_endereco not in df.columns:
+        df[col_endereco] = ""
+
+    # Data INÍCIO
+    col_data_inicio = (
+        pick_first_by_contains(cols, ["inicio", "início", "entrada"])
+        or pick_first_by_contains(cols, ["data (inicio)", "data inicio"])
+        or pick_first_by_startswith(cols, ["data"])
+        or "Data"
+    )
+    if col_data_inicio not in df.columns:
+        guess = pick_first_by_contains(cols, ["data", "hora"])
+        if guess and guess in df.columns:
+            col_data_inicio = guess
+        else:
+            raise ValueError(
+                "Não encontrei a coluna de Data/Entrada/Início no arquivo de Endereço. "
+                f"Colunas disponíveis: {', '.join(map(str, df.columns))}"
+            )
+
+    # Data FIM (Saída). Se não existir -> não quebra
+    col_data_fim = pick_first_by_contains(cols, ["saida", "saída", "fim", "final"])
+    if col_data_fim is None or col_data_fim not in df.columns:
+        df["__DATA_FIM__"] = pd.NaT
+        col_data_fim = "__DATA_FIM__"
+
+    # -----------------------------
+    # Limpeza e transformação
+    # -----------------------------
     df[col_colab] = (
         df[col_colab]
         .astype(str)
@@ -601,10 +666,10 @@ def read_pontos_endereco(uploaded_file) -> pd.DataFrame:
     df[col_data_inicio] = pd.to_datetime(df[col_data_inicio], errors="coerce")
     df[col_data_fim] = pd.to_datetime(df[col_data_fim], errors="coerce")
 
-    # ✅ mantém linhas com pelo menos UMA marcação
+    # mantém linhas com pelo menos UMA marcação
     df = df[df[col_data_inicio].notna() | df[col_data_fim].notna()].copy()
 
-    # ✅ se não tiver INÍCIO, usa FIM como início
+    # se não tiver INÍCIO, usa FIM como início
     df[col_data_inicio] = df[col_data_inicio].fillna(df[col_data_fim])
 
     df["DATA"] = df[col_data_inicio].dt.date
@@ -675,7 +740,6 @@ def build_matinal_table(df_he_final: pd.DataFrame, df_end: pd.DataFrame):
     for c in ["D1_50", "D1_70100", "ACUM50_BEFORE", "ACUM70100"]:
         tmp[c] = tmp[c].fillna(zero)
 
-    # saída pronta
     rows = []
     for nome2p in colaboradores:
         rec1 = idx_end.get((nome2p, dia_1))
@@ -715,7 +779,6 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # Linhas (como seu print)
     TITLE_ROW = 4
     GROUP_ROW = 6
     SUB_ROW = 7
@@ -730,7 +793,6 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     ws[f"A{TITLE_ROW}"].font = title_font
     ws[f"A{TITLE_ROW}"].alignment = center
 
-    # Cabeçalhos grupo
     ws.cell(GROUP_ROW, 1, "Nome")
     ws.cell(SUB_ROW, 1, "COLABORADOR")
 
@@ -752,7 +814,6 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
     ws.cell(SUB_ROW, 9, "50%")
     ws.cell(SUB_ROW, 10, "70% e 100%")
 
-    # Estilo cabeçalhos
     for rr in [GROUP_ROW, SUB_ROW]:
         for cc in range(1, total_cols + 1):
             cell = ws.cell(rr, cc)
@@ -761,7 +822,6 @@ def create_matinal_sheet(wb, dia_1: date, dia_2: date):
             cell.alignment = center
             cell.border = border
 
-    # larguras
     ws.column_dimensions["A"].width = 26
     ws.column_dimensions["B"].width = 11
     ws.column_dimensions["C"].width = 11
@@ -800,7 +860,7 @@ def write_matinal_values(ws, border, center, left, matinal_df: pd.DataFrame, sta
         for c, v in enumerate(values, start=2):
             cell = ws.cell(r, c)
             cell.value = v
-            cell.alignment = center if c != 4 and c != 8 else center  # base também central no print
+            cell.alignment = center
             cell.border = border
 
         r += 1
@@ -818,20 +878,16 @@ def generate_excel_bytes(df_he_final: pd.DataFrame, df_end: pd.DataFrame) -> byt
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Semanais
         for wname, wdf in weeks.items():
             wdf.to_excel(writer, sheet_name=wname, index=False)
 
-        # Resumo Geral
         resumo_geral.to_excel(writer, sheet_name="Resumo Geral", index=False)
 
         wb = writer.book
 
-        # Matinal formatado (igual ao print)
         ws_mat, border, center, left, DATA_START_ROW = create_matinal_sheet(wb, dia_1, dia_2)
         write_matinal_values(ws_mat, border, center, left, matinal_df, start_row=DATA_START_ROW)
 
-        # remove "Sheet" se existir
         if "Sheet" in wb.sheetnames:
             wb.remove(wb["Sheet"])
 
@@ -876,7 +932,6 @@ def main():
         # ===== ENDEREÇO =====
         df_end = read_pontos_endereco(end_file)
 
-        # previews
         st.success("✅ Arquivos processados!")
         st.subheader("Prévia HE (tratado)")
         st.dataframe(df_he_final[["Colaborador","Nome_2p","CPF","Data","Semana"]].head(30), use_container_width=True)
